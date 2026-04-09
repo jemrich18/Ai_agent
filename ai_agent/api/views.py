@@ -2,6 +2,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.shortcuts import render
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from agent.graph import build_graph
@@ -13,6 +15,7 @@ memory = MemorySaver()
 agent = build_graph(checkpointer=memory)
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class AgentView(APIView):
     def post(self, request):
         user_message = request.data.get("message")
