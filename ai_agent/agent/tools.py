@@ -15,7 +15,7 @@ class HuntingQueryInput(BaseModel):
 def get_weather(city: str) -> str:
     """Get the current weather for a given city."""
     geo_url = "https://geocoding-api.open-meteo.com/v1/search"
-    geo_response = requests.get(geo_url, params={"name": city, "count": 1})
+    geo_response = requests.get(geo_url, params={"name": city, "count": 1}, timeout=10)
     geo_data = geo_response.json()
 
     if not geo_data.get("results"):
@@ -34,7 +34,7 @@ def get_weather(city: str) -> str:
         "temperature_unit": "fahrenheit",
         "windspeed_unit": "mph",
         "forecast_days": 1
-    })
+    }, timeout=10)
     weather_data = weather_response.json()
     current = weather_data["current"]
 
