@@ -1,1 +1,1 @@
-web: gunicorn core.wsgi:application --chdir /app/ai_agent --log-file -
+web: gunicorn core.wsgi:application --log-file -
