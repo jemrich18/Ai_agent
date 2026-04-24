@@ -1,3 +1,4 @@
+import os
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -10,7 +11,8 @@ load_dotenv()
 
 tools = [get_weather, calculate, search_hunting_knowledge]
 
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+_model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+llm = ChatOpenAI(model=_model, temperature=0)
 llm_with_tools = llm.bind_tools(tools)
 
 SYSTEM_PROMPT = """You are an expert hunting and archery assistant with deep knowledge of:

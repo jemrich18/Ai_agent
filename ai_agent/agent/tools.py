@@ -1,6 +1,42 @@
+import ast
+import logging
+import operator
 import requests
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+_SAFE_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Pow: operator.pow,
+    ast.Mod: operator.mod,
+    ast.FloorDiv: operator.floordiv,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+}
+
+def _eval_node(node):
+    if isinstance(node, ast.Expression):
+        return _eval_node(node.body)
+    if isinstance(node, ast.Constant):
+        if not isinstance(node.value, (int, float)):
+            raise ValueError("Only numeric constants are allowed")
+        return node.value
+    if isinstance(node, ast.BinOp):
+        op = type(node.op)
+        if op not in _SAFE_OPS:
+            raise ValueError(f"Operator not permitted: {op.__name__}")
+        return _SAFE_OPS[op](_eval_node(node.left), _eval_node(node.right))
+    if isinstance(node, ast.UnaryOp):
+        op = type(node.op)
+        if op not in _SAFE_OPS:
+            raise ValueError(f"Operator not permitted: {op.__name__}")
+        return _SAFE_OPS[op](_eval_node(node.operand))
+    raise ValueError(f"Expression type not allowed: {type(node).__name__}")
 
 class WeatherInput(BaseModel):
     city: str = Field(description="The city name to get weather for")
@@ -14,42 +50,57 @@ class HuntingQueryInput(BaseModel):
 @tool(args_schema=WeatherInput)
 def get_weather(city: str) -> str:
     """Get the current weather for a given city."""
-    geo_url = "https://geocoding-api.open-meteo.com/v1/search"
-    geo_response = requests.get(geo_url, params={"name": city, "count": 1}, timeout=10)
-    geo_data = geo_response.json()
+    try:
+        geo_url = "https://geocoding-api.open-meteo.com/v1/search"
+        geo_response = requests.get(geo_url, params={"name": city, "count": 1}, timeout=10)
+        geo_response.raise_for_status()
+        geo_data = geo_response.json()
 
-    if not geo_data.get("results"):
-        return f"Could not find location: {city}"
+        if not geo_data.get("results"):
+            return f"Could not find location: {city}"
 
-    location = geo_data["results"][0]
-    lat = location["latitude"]
-    lon = location["longitude"]
-    name = location["name"]
+        location = geo_data["results"][0]
+        lat = location["latitude"]
+        lon = location["longitude"]
+        name = location["name"]
 
-    weather_url = "https://api.open-meteo.com/v1/forecast"
-    weather_response = requests.get(weather_url, params={
-        "latitude": lat,
-        "longitude": lon,
-        "current": "temperature_2m,weathercode,windspeed_10m,relative_humidity_2m",
-        "temperature_unit": "fahrenheit",
-        "windspeed_unit": "mph",
-        "forecast_days": 1
-    }, timeout=10)
-    weather_data = weather_response.json()
-    current = weather_data["current"]
+        weather_url = "https://api.open-meteo.com/v1/forecast"
+        weather_response = requests.get(weather_url, params={
+            "latitude": lat,
+            "longitude": lon,
+            "current": "temperature_2m,weathercode,windspeed_10m,relative_humidity_2m",
+            "temperature_unit": "fahrenheit",
+            "windspeed_unit": "mph",
+            "forecast_days": 1
+        }, timeout=10)
+        weather_response.raise_for_status()
+        weather_data = weather_response.json()
+        current = weather_data["current"]
 
-    temp = current["temperature_2m"]
-    humidity = current["relative_humidity_2m"]
-    wind = current["windspeed_10m"]
+        temp = current["temperature_2m"]
+        humidity = current["relative_humidity_2m"]
+        wind = current["windspeed_10m"]
 
-    return f"{name}: {temp}°F, humidity {humidity}%, wind {wind} mph"
+        return f"{name}: {temp}°F, humidity {humidity}%, wind {wind} mph"
+    except requests.Timeout:
+        logger.warning("Weather API timed out for city: %s", city)
+        return f"Weather lookup timed out for {city}. Try again in a moment."
+    except requests.RequestException as e:
+        logger.error("Weather API request failed: %s", e)
+        return f"Could not retrieve weather for {city}: network error."
+    except (KeyError, ValueError) as e:
+        logger.error("Weather API response parsing failed: %s", e)
+        return f"Could not parse weather data for {city}."
 
 @tool(args_schema=CalculateInput)
 def calculate(expression: str) -> str:
     """Evaluate a basic math expression like '2 + 2' or '10 * 5'."""
     try:
-        result = eval(expression)
+        tree = ast.parse(expression.strip(), mode="eval")
+        result = _eval_node(tree)
         return str(result)
+    except ZeroDivisionError:
+        return "Error: division by zero"
     except Exception as e:
         return f"Error evaluating expression: {e}"
 
@@ -187,24 +238,28 @@ HUNTING_KNOWLEDGE_BASE = {
 def search_kb(query: str) -> str:
     query_lower = query.lower()
     results = []
+    seen_keys = set()
 
-    if any(word in query_lower for word in ["otc", "over the counter", "whitetail", "deer tag", "non-resident deer"]):
-        if any(word in query_lower for word in ["elk"]):
-            data = HUNTING_KNOWLEDGE_BASE["otc_elk"]
-        elif any(word in query_lower for word in ["mule", "muley"]):
-            data = HUNTING_KNOWLEDGE_BASE["otc_mule_deer"]
-        else:
-            data = HUNTING_KNOWLEDGE_BASE["otc_whitetail"]
+    def _append_tag_data(key: str):
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        data = HUNTING_KNOWLEDGE_BASE[key]
         results.append(f"{data['description']}:\n")
         for s in data["states"]:
-            results.append(f"- {s['state']}: Non-resident ${s.get('non_resident', 'N/A')} — {s['notes']}")
+            results.append(f"- {s['state']}: Non-resident {s.get('non_resident', 'N/A')} — {s['notes']}")
         results.append(f"\nSource: {data['source']}")
 
-    if any(word in query_lower for word in ["elk tag", "elk hunt", "otc elk", "elk license"]):
-        data = HUNTING_KNOWLEDGE_BASE["otc_elk"]
-        results.append(f"\n{data['description']}:\n")
-        for s in data["states"]:
-            results.append(f"- {s['state']}: Non-resident {s['non_resident']} — {s['notes']}")
+    is_elk = any(word in query_lower for word in ["elk tag", "elk hunt", "otc elk", "elk license", "elk"])
+    is_mule = any(word in query_lower for word in ["mule deer", "muley", "mule tag"])
+    is_otc = any(word in query_lower for word in ["otc", "over the counter", "deer tag", "non-resident deer"])
+
+    if is_elk:
+        _append_tag_data("otc_elk")
+    elif is_mule:
+        _append_tag_data("otc_mule_deer")
+    elif is_otc or "whitetail" in query_lower:
+        _append_tag_data("otc_whitetail")
 
     if any(word in query_lower for word in ["preference point", "draw odds", "points", "western draw"]):
         data = HUNTING_KNOWLEDGE_BASE["preference_points"]
